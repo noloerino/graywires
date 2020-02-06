@@ -16,6 +16,8 @@ class GraphEdge:
     value: int
     width: int
     usage: WireUsage = WireUsage.USED
+    src: "GraphVertex" = None
+    dest: "GraphVertex" = None
 
 
 @dataclass
@@ -23,6 +25,12 @@ class GraphVertex:
     name: str
     inputs: List[GraphEdge]
     outputs: List[GraphEdge]
+
+    def __post_init__(self):
+        for e in self.inputs:
+            e.dest = self
+        for e in self.outputs:
+            e.src = self
 
     def update_input_usage(self):
         """
@@ -33,15 +41,15 @@ class GraphVertex:
 
     def get_node_usage(self):
         """
-        This node is used iff all its outgoing edges are used.
+        This node is used iff any of its outgoing edges are used.
         """
-        usages = map(lambda e: e.usage, self.outputs)
+        usages = [e.usage for e in self.outputs]
         if WireUsage.OUTPUT in usages:
             return WireUsage.OUTPUT
-        elif WireUsage.UNUSED in usages:
-            return WireUsage.UNUSED
-        else:
+        elif WireUsage.USED in usages:
             return WireUsage.USED
+        else:
+            return WireUsage.UNUSED
 
 
 # === Usage rules for simple gates ===
@@ -118,6 +126,10 @@ class NotGate1B(GraphVertex):
         # Input is always used
         assert bool(self.inputs[0].value) is not bool(self.outputs[0].value)
 
+class Mux4B(GraphVertex):
+    def update_input_usage(self):
+        pass
+
 def xor_from_nands_toposort(a: int, b: int) -> List[GraphVertex]:
     # Returns a topologically sorted graph representing an XOR circuit from 4 NANDs.
     # The output is the last wire.
@@ -136,35 +148,62 @@ def xor_from_nands_toposort(a: int, b: int) -> List[GraphVertex]:
     edge_m3_c = GraphEdge(m3, 1)
     # Peculiarity: create an edge with no ending node
     edge_c_out = GraphEdge(c, 1, usage=WireUsage.OUTPUT)
-    n_a = Input1B("a", [], [edge_a_m1, edge_a_m2])
-    n_b = Input1B("b", [], [edge_b_m1, edge_b_m3])
-    # Usage rules of AND and NAND gates are identical
-    n_m1 = NandGate1B("m1", [edge_a_m1, edge_b_m1], [edge_m1_m2, edge_m1_m3])
-    n_m2 = NandGate1B("m2", [edge_a_m2, edge_m1_m2], [edge_m2_c])
-    n_m3 = NandGate1B("m3", [edge_b_m3, edge_m1_m3], [edge_m3_c])
-    n_c = Output1B("c", [edge_m2_c, edge_m3_c], [edge_c_out])
     return [
-        n_a,
-        n_b,
-        n_m1,
-        n_m2,
-        n_m3,
-        n_c
+        Input1B("a", [], [edge_a_m1, edge_a_m2]),
+        Input1B("b", [], [edge_b_m1, edge_b_m3]),
+        NandGate1B("m1", [edge_a_m1, edge_b_m1], [edge_m1_m2, edge_m1_m3]),
+        NandGate1B("m2", [edge_a_m2, edge_m1_m2], [edge_m2_c]),
+        NandGate1B("m3", [edge_m1_m3, edge_b_m3], [edge_m3_c]),
+        NandGate1B("c", [edge_m2_c, edge_m3_c], [edge_c_out])
     ]
 
-def get_used_nodes(nodes):
-    # Assume last node is output (root set)
-    # Perform mark and sweep
-    # output = 
-    ...
+def zero_and() -> List[GraphVertex]:
+    a = GraphEdge(0, 1)
+    b = GraphEdge(1, 1)
+    return [
+        Input1B("a", [], [a]),
+        Input1B("b", [], [b]),
+        AndGate1B("and", [a, b], [GraphEdge(0, 1, usage=WireUsage.OUTPUT)])
+    ]
+
+def orphan_inputs() -> List[GraphVertex]:
+    a = GraphEdge(0, 1)
+    b = GraphEdge(1, 1)
+    c = GraphEdge(0, 1)
+    d = GraphEdge(1, 1)
+    # TODO c and d should be skipped due to mark and sweep
+    return [
+        Input1B("a", [], [a]),
+        Input1B("b", [], [b]),
+        Input1B("c", [], [c]),
+        Input1B("d", [], [d]),
+        AndGate1B("and", [a, b], [GraphEdge(0, 1, usage=WireUsage.OUTPUT)])
+    ]
+
+def mark_and_sweep(nodes: List[GraphVertex]) -> List[GraphVertex]:
+    # Assume the output (root set) is the last element
+    root = nodes[-1]
+    marked = [root]
+    # Track which nodes to traverse backwards
+    stack = [root]
+    while len(stack) != 0:
+        node = stack.pop()
+        for in_wire in node.inputs:
+            if in_wire.usage != WireUsage.UNUSED and in_wire.src not in marked:
+                marked.append(in_wire.src)
+                stack.append(in_wire.src)
+    return marked[::-1]
+
 
 def main():
-    # nodes = xor_from_nands_toposort(0, 0)
+    # nodes = xor_from_nands_toposort(1, 1)
+    # nodes = zero_and()
     nodes = orphan_inputs()
     for node in nodes:
         node.update_input_usage()
-    for node in nodes:
+    for node in mark_and_sweep(nodes):
         print(f"{node.name}: {node.get_node_usage()}")
+        # print(node)
 
 if __name__ == '__main__':
     main()
