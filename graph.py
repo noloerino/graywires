@@ -158,7 +158,7 @@ def compute_usage(nodes: List[GraphVertex], last_cycle=0) -> List[GraphVertex]:
     for i in range(last_cycle + 1):
         for node in nodes:
             node.update_input_usage(node.inputs.get(i, []), node.outputs.get(i, []))
-        print([f"usage: {node.name}@{i} {node.get_node_usage(i)}" for node in nodes])
+        # print([f"usage: {node.name}@{i} {node.get_node_usage(i)}" for node in nodes])
     return mark_and_sweep(nodes, last_cycle)
 
 def mark_and_sweep(nodes: List[GraphVertex], last_cycle=0) -> List[GraphVertex]:

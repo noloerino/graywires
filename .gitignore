@@ -1,2 +1,4 @@
+*.vcd
+venv/
 __pycache__
 

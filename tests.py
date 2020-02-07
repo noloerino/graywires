@@ -41,6 +41,7 @@ class TestMultiCycle(unittest.TestCase):
         self.assertIsNone(find_wire(used, "a", 1))
         self.assertIsNone(find_wire(used, "m", 1))
         self.assertIsNotNone(find_wire(used, "out", 1))
+        return (nodes, used)
 
 
 class TestSingleCycle(unittest.TestCase):
@@ -128,3 +129,4 @@ class TestSingleCycle(unittest.TestCase):
         # orphaned inputs
         self.assertIsNone(find_wire(used, "c"))
         self.assertIsNone(find_wire(used, "d"))
+        return (nodes, used)
