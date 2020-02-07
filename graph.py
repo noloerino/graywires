@@ -1,7 +1,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import List
+from typing import Dict, List
 
 
 class WireUsage(Enum):
@@ -27,27 +27,40 @@ def Edge1B(cycle, value, usage=WireUsage.USED):
 @dataclass
 class GraphVertex:
     name: str
-    inputs: List[GraphEdge]
-    outputs: List[GraphEdge]
+    # Inputs and outputs are keyed on cycle.
+    # It should be interpreted as "on cycle [key], these inputs produce these outputs."
+    # Even though edges encode cycles, it is possible for a value from cycle 0 to be used on cycle 1,
+    # which is how we represent registers.
+    inputs: Dict[int, List[GraphEdge]]
+    outputs: Dict[int, List[GraphEdge]]
 
     def __post_init__(self):
-        for e in self.inputs:
-            e.dest = self
-        for e in self.outputs:
-            e.src = self
+        for _, input_list in self.inputs.items():
+            for e in input_list:
+                e.dest = self
+        for _, output_list in self.outputs.items():
+            for e in output_list:
+                e.src = self
 
-    def update_input_usage(self):
+    def __repr__(self):
+        return f"GraphVertex(name={self.name})"
+
+    def update_input_usage(self, inputs, outputs):
         """
-        Updates the usage of input edges based on the values of outputs, assuming that
-        inputs are initialized to USED.
+        Updates the usage of the given input edges on a given cycle based on the values
+        of the given outputs, assuming that inputs are initialized to USED.
         """
         raise NotImplementedError()
 
-    def get_node_usage(self):
+    def get_node_usage(self, cycle=0):
         """
-        This node is used iff any of its outgoing edges are used.
+        Calculates whether or not this node is used on the specified cycle.
+
+        A quirk of the current system is that all outgoing edges actually represent
+        a single output wire coming from the gate represented by this GraphVertex.
+        Consequently, this wire is USED if any of its "outputs" are USED.
         """
-        usages = [e.usage for e in self.outputs]
+        usages = [e.usage for e in self.outputs.get(cycle, [])]
         if WireUsage.OUTPUT in usages:
             return WireUsage.OUTPUT
         elif WireUsage.USED in usages:
@@ -58,21 +71,21 @@ class GraphVertex:
 
 # === Usage rules for simple gates ===
 class Input1B(GraphVertex):
-    def update_input_usage(self):
-        pass
+    def update_input_usage(self, inputs, outputs):
+        assert len(inputs) == 0
 
 class Output1B(GraphVertex):
-    def update_input_usage(self):
+    def update_input_usage(self, inputs, outputs):
         pass
 
 class AndGate1B(GraphVertex):
-    def update_input_usage(self):
-        a = self.inputs[0].value
-        b = self.inputs[1].value
+    def update_input_usage(self, inputs, outputs):
+        a = inputs[0].value
+        b = inputs[1].value
         # TODO
         # Since there's a single output, all should be of the same value
         # How do we propagate this?
-        if self.outputs[0].value == 1:
+        if outputs[0].value == 1:
             # Both certainly used
             pass
         else:
@@ -81,17 +94,17 @@ class AndGate1B(GraphVertex):
                 pass
             elif a == 0:
                 # a used, b unused
-                self.inputs[1].usage = WireUsage.UNUSED
+                inputs[1].usage = WireUsage.UNUSED
             elif b == 0:
-                self.inputs[0].usage = WireUsage.UNUSED
+                inputs[0].usage = WireUsage.UNUSED
             else:
                 assert False, "Impossible case in AndGate1B"
 
 class NandGate1B(GraphVertex):
-    def update_input_usage(self):
-        a = self.inputs[0].value
-        b = self.inputs[1].value
-        if self.outputs[0].value == 0:
+    def update_input_usage(self, inputs, outputs):
+        a = inputs[0].value
+        b = inputs[1].value
+        if outputs[0].value == 0:
             # Both certainly used
             pass
         else:
@@ -100,17 +113,17 @@ class NandGate1B(GraphVertex):
                 pass
             elif a == 0:
                 # a used, b unused
-                self.inputs[1].usage = WireUsage.UNUSED
+                inputs[1].usage = WireUsage.UNUSED
             elif b == 0:
-                self.inputs[0].usage = WireUsage.UNUSED
+                inputs[0].usage = WireUsage.UNUSED
             else:
                 assert False, "Impossible case in NandGate1B"
 
 class OrGate1B(GraphVertex):
-    def update_input_usage(self):
-        a = self.inputs[0].value
-        b = self.inputs[1].value
-        if self.outputs[0].value == 0:
+    def update_input_usage(self, inputs, outputs):
+        a = inputs[0].value
+        b = inputs[1].value
+        if outputs[0].value == 0:
             # Both certainly used
             pass
         else:
@@ -119,35 +132,47 @@ class OrGate1B(GraphVertex):
                 pass
             elif a == 1:
                 # a used, b unused
-                self.inputs[1].usage = WireUsage.UNUSED
+                inputs[1].usage = WireUsage.UNUSED
             elif b == 1:
-                self.inputs[0].usage = WireUsage.UNUSED
+                inputs[0].usage = WireUsage.UNUSED
             else:
                 assert False, "Impossible case in OrGate1B"
 
 class NotGate1B(GraphVertex):
-    def update_input_usage(self):
+    def update_input_usage(self, inputs, outputs):
         # Input is always used
-        assert bool(self.inputs[0].value) is not bool(self.outputs[0].value)
+        assert bool(outputs[0].value) is not bool(inputs[0].value)
+
+class XorGate1B(GraphVertex):
+    def update_input_usage(self, inputs, outputs):
+        # Everything's used
+        assert bool(outputs[0].value) is bool(inputs[0].value ^ inputs[1].value)
 
 class Mux4B(GraphVertex):
-    def update_input_usage(self):
+    def update_input_usage(self, inputs, outputs):
+        # TODO
         pass
 
-def compute_usage(nodes: List[GraphVertex]) -> List[GraphVertex]:
-    for node in nodes:
-        node.update_input_usage()
-    return mark_and_sweep(nodes)
+def compute_usage(nodes: List[GraphVertex], last_cycle=0) -> List[GraphVertex]:
+    # Iterate forwards through cycles - though outputs affect inputs, we still propagate forwards
+    for i in range(last_cycle + 1):
+        for node in nodes:
+            node.update_input_usage(node.inputs.get(i, []), node.outputs.get(i, []))
+        print([f"usage: {node.name}@{i} {node.get_node_usage(i)}" for node in nodes])
+    return mark_and_sweep(nodes, last_cycle)
 
-def mark_and_sweep(nodes: List[GraphVertex]) -> List[GraphVertex]:
-    root_set = [node for node in nodes if node.get_node_usage() is WireUsage.OUTPUT]
+def mark_and_sweep(nodes: List[GraphVertex], last_cycle=0) -> List[GraphVertex]:
+    root_set = []
+    for i in range(last_cycle + 1):
+        root_set = [(node, i) for node in nodes if node.get_node_usage(i) is WireUsage.OUTPUT]
     marked = root_set[:]
     # Track which nodes to traverse backwards
     stack = root_set[:]
     while len(stack) != 0:
-        node = stack.pop()
-        for in_wire in node.inputs:
-            if in_wire.usage != WireUsage.UNUSED and in_wire.src not in marked:
-                marked.append(in_wire.src)
-                stack.append(in_wire.src)
+        (node, cycle) = stack.pop()
+        for in_wire in node.inputs.get(cycle, []):
+            pair = (in_wire.src, in_wire.cycle)
+            if in_wire.usage != WireUsage.UNUSED and pair not in marked:
+                marked.append(pair)
+                stack.append(pair)
     return marked[::-1]
