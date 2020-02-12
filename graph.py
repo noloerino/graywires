@@ -1,7 +1,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 class WireUsage(Enum):
@@ -16,8 +16,8 @@ class GraphEdge:
     value: int
     width: int
     usage: WireUsage = WireUsage.USED
-    src: "GraphVertex" = None
-    dest: "GraphVertex" = None
+    src: Optional["GraphVertex"] = None
+    dest: Optional["GraphVertex"] = None
 
 
 def Edge1B(cycle, value, usage=WireUsage.USED):
@@ -161,7 +161,7 @@ def compute_usage(nodes: List[GraphVertex], last_cycle=0) -> List[GraphVertex]:
         # print([f"usage: {node.name}@{i} {node.get_node_usage(i)}" for node in nodes])
     return mark_and_sweep(nodes, last_cycle)
 
-def mark_and_sweep(nodes: List[GraphVertex], last_cycle=0) -> List[GraphVertex]:
+def mark_and_sweep(nodes: List[GraphVertex], last_cycle=0) -> List[Tuple[GraphVertex, int]]:
     root_set = []
     for i in range(last_cycle + 1):
         root_set = [(node, i) for node in nodes if node.get_node_usage(i) is WireUsage.OUTPUT]

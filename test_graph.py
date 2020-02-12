@@ -1,3 +1,7 @@
+"""
+Tests circuits constructed strictly using the graph primitives in graph.py.9gg
+"""
+
 import unittest
 from graph import *
 
