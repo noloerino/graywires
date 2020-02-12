@@ -1,8 +1,8 @@
 
 import collections.abc
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, Set
+from typing import Dict, List, Set, Tuple, Union
 import vcd # type: ignore
 
 @dataclass(frozen=True)
@@ -22,7 +22,7 @@ class WireUsage(Enum):
     OUTPUT = 2
 
 
-@dataclass(frozen=True)
+@dataclass
 class ConcreteWire:
     """
     The concrete value of a named wire on a given cycle.
@@ -33,13 +33,33 @@ class ConcreteWire:
     bv: BitVector
     cycle: int
     usage: WireUsage = WireUsage.UNUSED
+    srcs: List["ConcreteWire"] = field(default_factory=list) # Represents the wires that are used to compute this wire
 
-    def __and__(self, o) -> BitVector:
-        # TODO add usage checks
-        return BitVector(self.bv.value & o.bv.value, min(self.bv.width, o.bv.width))
+    def __and__(self, o) -> Tuple[BitVector, List["ConcreteWire"]]:
+        if self.bv.value == 1 and o.bv.value == 1:
+            self.usage = WireUsage.USED
+            o.usage = WireUsage.USED
+        elif self.bv.value == 1 and o.bv.value == 0:
+            self.usage = WireUsage.UNUSED
+            o.usage = WireUsage.USED
+        elif self.bv.value == 0 and o.bv.value == 1:
+            self.usage = WireUsage.USED
+            o.usage = WireUsage.UNUSED
+        else:
+            self.usage = WireUsage.USED
+            o.usage = WireUsage.USED
+        return (
+            BitVector(self.bv.value & o.bv.value, min(self.bv.width, o.bv.width)),
+            [self, o]
+        )
 
-    def __xor__(self, o) -> BitVector:
-        return BitVector(self.bv.value ^ o.bv.value, min(self.bv.width, o.bv.width))
+    def __xor__(self, o) -> Tuple[BitVector, List["ConcreteWire"]]:
+        self.usage = WireUsage.USED
+        o.usage = WireUsage.USED
+        return (
+            BitVector(self.bv.value ^ o.bv.value, min(self.bv.width, o.bv.width)),
+            [self, o]
+        )
 
 
 @dataclass
@@ -59,10 +79,15 @@ class WireBundle(collections.abc.MutableMapping):
     def __getitem__(self, key: str) -> ConcreteWire:
         return self.wires[key]
 
-    def __setitem__(self, key: str, value: BitVector):
+    def __setitem__(self, key: str, value: Union[ConcreteWire, Tuple[BitVector, List[ConcreteWire]]]):
         if self.frozen:
             raise KeyError("Cannot write to a frozen WireBundle")
-        self.wires[key] = ConcreteWire(key, value, self.cycle)
+        wire: ConcreteWire
+        if type(value) == ConcreteWire:
+            wire = ConcreteWire(key, value.bv, self.cycle, srcs=[value])
+        else:
+            wire = ConcreteWire(key, value[0], self.cycle, srcs=value[1])
+        self.wires[key] = wire
 
     def __delitem__(self, key: str):
         del self.wires[key]
@@ -111,7 +136,7 @@ class Circuit:
         with open(path, "w") as f:
             with vcd.VCDWriter(f, timescale="1 ns", date="today") as writer:
                 clk = writer.register_var("module", "clk", "time", size=1)
-                vcd_var_dict = {}
+                vcd_var_dict = {} # holds stuff to write to vcd
                 curr_state = self.get_initial_state()
                 curr_state.freeze()
                 # Initialize dict of vcd variables
@@ -122,7 +147,7 @@ class Circuit:
                 # Run no-op simulation of cycle 0 to get all inputs and outputs registered
                 vcd_inputs_0 = WireBundle(0)
                 for name, value in input_values[0].items():
-                    vcd_inputs_0[name] = value
+                    vcd_inputs_0[name] = (value, [])
                 for wire in vcd_inputs_0.values():
                     vcd_register(wire)
                 vcd_outputs_0 = WireBundle(0)
@@ -133,11 +158,11 @@ class Circuit:
                 for i in range(sim_cycles):
                     curr_inputs = WireBundle(i)
                     for name, value in input_values[i].items():
-                        curr_inputs[name] = value
+                        curr_inputs[name] = (value, [])
                     curr_inputs.freeze()
                     next_state = WireBundle(i + 1)
                     curr_outputs = WireBundle(i)
-                    # Update VCD values for the last cycle
+                    # Update VCD values for the last cycle and stores it in the dict of all wires
                     def update_wire(i, wire):
                         assert i == wire.cycle, f"Wire {wire} was updated on cycle {i}"
                         var = vcd_var_dict[wire.name]
@@ -149,6 +174,7 @@ class Circuit:
                         update_wire(i, wire)
                     # Tick clock
                     self.at_posedge_clk(curr_state, curr_inputs, next_state, curr_outputs)
+                    # Sample every wire to construct usage graph
                     for wire in curr_outputs.values():
                         update_wire(i, wire)
                     writer.change(clk, i * CYCLE_LEN_NS, 1) # posedge
@@ -156,7 +182,7 @@ class Circuit:
                     curr_state = next_state
                     curr_state.freeze()
         # TODO just need to perform mark and sweep here, with READ_OUTPUTS as root set
-
+        root_set: Set[ConcreteWire] = set()
 
 # === Simple CL Gates ===
 class AndGate1B(Circuit):
@@ -167,12 +193,12 @@ class AndGate1B(Circuit):
 class XorFeedback(Circuit):
     def get_initial_state(self):
         w = WireBundle(0)
-        w["m"] = BitVector(0, 1)
+        w["m"] = (BitVector(0, 1), [])
         return w
 
     def at_posedge_clk(self, curr_state, inputs, next_state, outputs):
         next_state["m"] = inputs["a"] ^ curr_state["m"]
-        outputs["q"] = curr_state["m"].bv
+        outputs["q"] = curr_state["m"]
 
 def BV1(value):
     return BitVector(value, 1)
