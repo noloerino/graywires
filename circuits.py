@@ -135,11 +135,11 @@ class Circuit:
                     for name, value in input_values[i].items():
                         curr_inputs[name] = value
                     curr_inputs.freeze()
-                    next_state = WireBundle(i)
+                    next_state = WireBundle(i + 1)
                     curr_outputs = WireBundle(i)
                     # Update VCD values for the last cycle
                     def update_wire(i, wire):
-                        assert i == wire.cycle
+                        assert i == wire.cycle, f"Wire {wire} was updated on cycle {i}"
                         var = vcd_var_dict[wire.name]
                         print(f"{wire}@{i}={wire.bv.value}")
                         writer.change(var, i * CYCLE_LEN_NS, wire.bv.value)
@@ -147,12 +147,12 @@ class Circuit:
                         update_wire(i, wire)
                     for wire in curr_state.values():
                         update_wire(i, wire)
+                    # Tick clock
+                    self.at_posedge_clk(curr_state, curr_inputs, next_state, curr_outputs)
                     for wire in curr_outputs.values():
                         update_wire(i, wire)
                     writer.change(clk, i * CYCLE_LEN_NS, 1) # posedge
                     writer.change(clk, i * CYCLE_LEN_NS + CYCLE_LEN_NS // 2, 0) # negedge
-                    # Tick clock
-                    self.at_posedge_clk(curr_state, curr_inputs, next_state, curr_outputs)
                     curr_state = next_state
                     curr_state.freeze()
         # TODO just need to perform mark and sweep here, with READ_OUTPUTS as root set
