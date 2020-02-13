@@ -11,12 +11,6 @@ class BitVector:
     width: int
 
 
-class WireUsage(Enum):
-    UNUSED = 0
-    USED = 1
-    OUTPUT = 2
-
-
 @dataclass
 class ConcreteWire:
     """
@@ -27,40 +21,29 @@ class ConcreteWire:
     name: str
     bv: BitVector
     cycle: int
-    usage: WireUsage = WireUsage.UNUSED
-    srcs: List["ConcreteWire"] = field(default_factory=list) # Represents the wires that are used to compute this wire
+    # Represents the wires that are used to compute this wire
+    # This also gives us muxes for free, with the one caveat that the sel
+    srcs: List["ConcreteWire"] = field(default_factory=list)
 
-    # TODO If we proceed with returning the list of sources anyway, we might not even need
-    # the whole used/unused field, since the list populates edges anyway, and usage is a proxy
-    # for the existence of an edge.
     def __and__(self, o) -> Tuple[BitVector, List["ConcreteWire"]]:
+        bv = BitVector(self.bv.value & o.bv.value, min(self.bv.width, o.bv.width))
         if self.bv.value == 1 and o.bv.value == 1:
-            self.usage = WireUsage.USED
-            o.usage = WireUsage.USED
+            return (bv, [self, o])
         elif self.bv.value == 1 and o.bv.value == 0:
-            self.usage = WireUsage.UNUSED
-            o.usage = WireUsage.USED
+            return (bv, [o])
         elif self.bv.value == 0 and o.bv.value == 1:
-            self.usage = WireUsage.USED
-            o.usage = WireUsage.UNUSED
+            return (bv, [self])
         else:
-            self.usage = WireUsage.USED
-            o.usage = WireUsage.USED
-        return (
-            BitVector(self.bv.value & o.bv.value, min(self.bv.width, o.bv.width)),
-            [self, o]
-        )
+            return (bv, [self, o])
 
     def __xor__(self, o) -> Tuple[BitVector, List["ConcreteWire"]]:
-        self.usage = WireUsage.USED
-        o.usage = WireUsage.USED
         return (
             BitVector(self.bv.value ^ o.bv.value, min(self.bv.width, o.bv.width)),
             [self, o]
         )
 
     def __repr__(self) -> str:
-        return f"ConcreteWire(name={self.name}, bv={self.bv}, cycle={self.cycle}, usage={self.usage})"
+        return f"ConcreteWire(name={self.name}, bv={self.bv}, cycle={self.cycle})"
 
 
 @dataclass
@@ -126,6 +109,128 @@ class Circuit:
     def get_initial_state(self) -> WireBundle:
         return WireBundle(0)
 
+    def _vcd_init_vars(self, writer, input_values): # (Dict[str, vcd variable], clk)
+        clk = writer.register_var("module", "clk", "time", size=1)
+        vcd_var_dict = {} # holds stuff to write to vcd
+        # Initialize dict of vcd variables
+        def vcd_register(wire):
+            vcd_var_dict[wire.name] = writer.register_var("module", wire.name, "integer", size=wire.bv.width)
+        vcd_state_0 = self.get_initial_state().freeze()
+        for wire in vcd_state_0.values():
+            vcd_register(wire)
+        # Run no-op simulation of cycle 0 to get all inputs and outputs registered
+        vcd_inputs_0 = WireBundle(0)
+        for name, value in input_values[0].items():
+            vcd_inputs_0[name] = (value, [])
+        for wire in vcd_inputs_0.values():
+            vcd_register(wire)
+        vcd_outputs_0 = WireBundle(0)
+        self.at_posedge_clk(vcd_state_0, vcd_inputs_0, WireBundle(0), vcd_outputs_0)
+        for wire in vcd_outputs_0.values():
+            vcd_register(wire)
+        return vcd_var_dict, clk
+
+    def _simulate_raw(
+        self,
+        writer,
+        sim_cycles,
+        input_values: Dict[int, Dict[str, BitVector]],
+        read_outputs: Dict[int, Set[str]]
+        ) -> List[ConcreteWire]:
+        """
+        Simulates the circuit for SIM_CYCLES and writes a VCD of the run.
+
+        INPUT_VALUES maps cycles to a map of wires to values.
+        READ_OUTPUTS maps cycles to the list of values read on every cycle, which forms
+
+        Returns the concrete wires in the root set.
+        """
+        # Must be root list rather than set since ConcreteWire isn't hashable
+        roots: List[ConcreteWire] = []
+        vcd_var_dict, clk = self._vcd_init_vars(writer, input_values)
+        curr_state = self.get_initial_state().freeze()
+        
+        # Run actual simulation
+        for i in range(sim_cycles):
+            curr_inputs = WireBundle(i)
+            for name, value in input_values[i].items():
+                curr_inputs[name] = (value, [])
+            curr_inputs.freeze()
+            next_state = WireBundle(i + 1)
+            curr_outputs = WireBundle(i)
+            # Update VCD values for the last cycle and stores it in the dict of all wires
+            def update_wire(i, wire):
+                assert i == wire.cycle, f"Wire {wire} was updated on cycle {i}"
+                var = vcd_var_dict[wire.name]
+                writer.change(var, i * CYCLE_LEN_NS, wire.bv.value)
+            for wire in curr_inputs.values():
+                update_wire(i, wire)
+            for wire in curr_state.values():
+                update_wire(i, wire)
+            # Tick clock
+            self.at_posedge_clk(curr_state, curr_inputs, next_state, curr_outputs)
+            curr_state = next_state.freeze()
+            # Update root set if necessary
+            if i in read_outputs:
+                for wire_name in read_outputs[i]:
+                    wire = curr_outputs[wire_name]
+                    roots.append(wire)
+            # Write outputs to VCD
+            for wire in curr_outputs.values():
+                update_wire(i, wire)
+            writer.change(clk, i * CYCLE_LEN_NS, 1) # posedge
+            writer.change(clk, i * CYCLE_LEN_NS + CYCLE_LEN_NS // 2, 0) # negedge
+        return roots
+
+
+    def _simulate_with_usage(
+        self,
+        writer,
+        sim_cycles,
+        input_values: Dict[int, Dict[str, BitVector]],
+        used_wires: List[ConcreteWire]
+        ):
+        """
+        Simulates the circuit and writes a VCD, this time Xing out any wire that's not used.
+
+        USED_WIRES comes from the mark and sweep phas.
+        """
+        vcd_var_dict, clk = self._vcd_init_vars(writer, input_values)
+        curr_state = self.get_initial_state().freeze()
+
+        used_lookup_list = [(wire.name, wire.cycle) for wire in used_wires]
+        
+        # Run actual simulation
+        for i in range(sim_cycles):
+            curr_inputs = WireBundle(i)
+            for name, value in input_values[i].items():
+                curr_inputs[name] = (value, [])
+            curr_inputs.freeze()
+            next_state = WireBundle(i + 1)
+            curr_outputs = WireBundle(i)
+            # Update VCD values for the last cycle and stores it in the dict of all wires
+            def update_wire(i, wire):
+                assert i == wire.cycle, f"Wire {wire} was updated on cycle {i}"
+                var = vcd_var_dict[wire.name]
+                value = wire.bv.value
+                if (wire.name, wire.cycle) not in used_lookup_list:
+                    # print(f"{wire} was not in used")
+                    value = "x"
+                writer.change(var, i * CYCLE_LEN_NS, value)
+            for wire in curr_inputs.values():
+                update_wire(i, wire)
+            for wire in curr_state.values():
+                update_wire(i, wire)
+            # Tick clock
+            self.at_posedge_clk(curr_state, curr_inputs, next_state, curr_outputs)
+            curr_state = next_state.freeze()
+            # Write outputs to VCD
+            for wire in curr_outputs.values():
+                update_wire(i, wire)
+            writer.change(clk, i * CYCLE_LEN_NS, 1) # posedge
+            writer.change(clk, i * CYCLE_LEN_NS + CYCLE_LEN_NS // 2, 0) # negedge
+
+
     def dump(self, path, sim_cycles, input_values: Dict[int, Dict[str, BitVector]], read_outputs: Dict[int, Set[str]]):
         """
         Simulates the circuit for SIM_CYCLES, and writes the result to a VCD at PATH.
@@ -137,68 +242,20 @@ class Circuit:
         assert sim_cycles > 0, "Must simulate for at least 1 cycle"
         with open(path, "w") as f:
             with vcd.VCDWriter(f, timescale="1 ns", date="today") as writer:
-                clk = writer.register_var("module", "clk", "time", size=1)
-                vcd_var_dict = {} # holds stuff to write to vcd
-                # Must be root list rather than set since ConcreteWire isn't hashable
-                roots: List[ConcreteWire] = []
-                curr_state = self.get_initial_state().freeze()
-                # Initialize dict of vcd variables
-                def vcd_register(wire):
-                    vcd_var_dict[wire.name] = writer.register_var("module", wire.name, "integer", size=wire.bv.width)
-                for wire in curr_state.values():
-                    vcd_register(wire)
-                # Run no-op simulation of cycle 0 to get all inputs and outputs registered
-                vcd_inputs_0 = WireBundle(0)
-                for name, value in input_values[0].items():
-                    vcd_inputs_0[name] = (value, [])
-                for wire in vcd_inputs_0.values():
-                    vcd_register(wire)
-                vcd_outputs_0 = WireBundle(0)
-                self.at_posedge_clk(curr_state, vcd_inputs_0, WireBundle(0), vcd_outputs_0)
-                for wire in vcd_outputs_0.values():
-                    vcd_register(wire)
-                # Run actual simulation
-                for i in range(sim_cycles):
-                    curr_inputs = WireBundle(i)
-                    for name, value in input_values[i].items():
-                        curr_inputs[name] = (value, [])
-                    curr_inputs.freeze()
-                    next_state = WireBundle(i + 1)
-                    curr_outputs = WireBundle(i)
-                    # Update VCD values for the last cycle and stores it in the dict of all wires
-                    def update_wire(i, wire):
-                        assert i == wire.cycle, f"Wire {wire} was updated on cycle {i}"
-                        var = vcd_var_dict[wire.name]
-                        writer.change(var, i * CYCLE_LEN_NS, wire.bv.value)
-                    for wire in curr_inputs.values():
-                        update_wire(i, wire)
-                    for wire in curr_state.values():
-                        update_wire(i, wire)
-                    # Tick clock
-                    self.at_posedge_clk(curr_state, curr_inputs, next_state, curr_outputs)
-                    curr_state = next_state.freeze()
-                    # Update root set if necessary
-                    if i in read_outputs:
-                        for wire_name in read_outputs[i]:
-                            wire = curr_outputs[wire_name]
-                            wire.usage = WireUsage.OUTPUT
-                            roots.append(wire)
-                    # Write outputs to VCD
-                    for wire in curr_outputs.values():
-                        update_wire(i, wire)
-                    writer.change(clk, i * CYCLE_LEN_NS, 1) # posedge
-                    writer.change(clk, i * CYCLE_LEN_NS + CYCLE_LEN_NS // 2, 0) # negedge
-        # Root set was populated during simulation - now, we mark and sweep
-        # print(f"Roots: {roots}")
-        marked = roots[:]
-        stack = roots[:]
-        while len(stack) != 0:
-            wire = stack.pop()
-            for in_wire in wire.srcs:
-                if in_wire.usage != WireUsage.UNUSED and in_wire not in marked:
-                    marked.append(in_wire)
-                    stack.append(in_wire)
-        print(marked)
+                roots = self._simulate_raw(writer, sim_cycles, input_values, read_outputs)
+                # Root set was populated during simulation - now, we mark and sweep
+                # print(f"Roots: {roots}")
+                marked = roots[:]
+                stack = roots[:]
+                while len(stack) != 0:
+                    wire = stack.pop()
+                    for in_wire in wire.srcs:
+                        if in_wire not in marked:
+                            marked.append(in_wire)
+                            stack.append(in_wire)
+                with open(f"usage_{path}", "w") as f:
+                    with vcd.VCDWriter(f, timescale="1 ns", date="today") as writer:
+                        self._simulate_with_usage(writer, sim_cycles, input_values, marked)
 
 
 # === Simple CL Gates ===
@@ -228,7 +285,10 @@ if __name__ == '__main__':
         2: {"a": BV1(1), "b": BV1(0)},
         3: {"a": BV1(1), "b": BV1(1)},
     }, {
-        3: {"q"}
+        0: {"q"},
+        1: {"q"},
+        2: {"q"},
+        3: {"q"},
     })
 
     # circ2 = XorFeedback()
@@ -237,4 +297,6 @@ if __name__ == '__main__':
     #     1: {"a": BV1(1)},
     #     2: {"a": BV1(1)},
     #     3: {"a": BV1(1)},
-    # }, {})
+    # }, {
+    #     3: {"q"}
+    # })
