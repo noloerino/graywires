@@ -1,7 +1,7 @@
 from typing import List, Tuple
 import vcd
 from graph import *
-from tests import TestMultiCycle, TestSingleCycle
+from test_graph import TestMultiCycle, TestSingleCycle
 
 def dump(path, nodes: List[GraphVertex], used: Tuple[List[GraphVertex], int] = None, last_cycle=0):
     # Assume that all nodes have only one output

@@ -10,11 +10,6 @@ class BitVector:
     value: int
     width: int
 
-    def __getattr__(self, name: str):
-        if name == "value":
-            return ((0xffffffff + (1 << self.width)) & 0xffffffff) & self.value
-        raise AttributeError()
-
 
 class WireUsage(Enum):
     UNUSED = 0
@@ -35,6 +30,9 @@ class ConcreteWire:
     usage: WireUsage = WireUsage.UNUSED
     srcs: List["ConcreteWire"] = field(default_factory=list) # Represents the wires that are used to compute this wire
 
+    # TODO If we proceed with returning the list of sources anyway, we might not even need
+    # the whole used/unused field, since the list populates edges anyway, and usage is a proxy
+    # for the existence of an edge.
     def __and__(self, o) -> Tuple[BitVector, List["ConcreteWire"]]:
         if self.bv.value == 1 and o.bv.value == 1:
             self.usage = WireUsage.USED
@@ -61,6 +59,9 @@ class ConcreteWire:
             [self, o]
         )
 
+    def __repr__(self) -> str:
+        return f"ConcreteWire(name={self.name}, bv={self.bv}, cycle={self.cycle}, usage={self.usage})"
+
 
 @dataclass
 class WireBundle(collections.abc.MutableMapping):
@@ -83,7 +84,7 @@ class WireBundle(collections.abc.MutableMapping):
         if self.frozen:
             raise KeyError("Cannot write to a frozen WireBundle")
         wire: ConcreteWire
-        if type(value) == ConcreteWire:
+        if isinstance(value, ConcreteWire):
             wire = ConcreteWire(key, value.bv, self.cycle, srcs=[value])
         else:
             wire = ConcreteWire(key, value[0], self.cycle, srcs=value[1])
@@ -98,12 +99,13 @@ class WireBundle(collections.abc.MutableMapping):
     def __len__(self):
         return len(self.wires)
 
-    def freeze(self):
+    def freeze(self) -> "WireBundle":
         """
         Prevents modifications from being made to the WireBundle, e.g. once computation of a state
         has been completed.
         """
         self.frozen = True
+        return self
 
 
 CYCLE_LEN_NS = 2
@@ -137,8 +139,9 @@ class Circuit:
             with vcd.VCDWriter(f, timescale="1 ns", date="today") as writer:
                 clk = writer.register_var("module", "clk", "time", size=1)
                 vcd_var_dict = {} # holds stuff to write to vcd
-                curr_state = self.get_initial_state()
-                curr_state.freeze()
+                # Must be root list rather than set since ConcreteWire isn't hashable
+                roots: List[ConcreteWire] = []
+                curr_state = self.get_initial_state().freeze()
                 # Initialize dict of vcd variables
                 def vcd_register(wire):
                     vcd_var_dict[wire.name] = writer.register_var("module", wire.name, "integer", size=wire.bv.width)
@@ -166,7 +169,6 @@ class Circuit:
                     def update_wire(i, wire):
                         assert i == wire.cycle, f"Wire {wire} was updated on cycle {i}"
                         var = vcd_var_dict[wire.name]
-                        print(f"{wire}@{i}={wire.bv.value}")
                         writer.change(var, i * CYCLE_LEN_NS, wire.bv.value)
                     for wire in curr_inputs.values():
                         update_wire(i, wire)
@@ -174,15 +176,30 @@ class Circuit:
                         update_wire(i, wire)
                     # Tick clock
                     self.at_posedge_clk(curr_state, curr_inputs, next_state, curr_outputs)
-                    # Sample every wire to construct usage graph
+                    curr_state = next_state.freeze()
+                    # Update root set if necessary
+                    if i in read_outputs:
+                        for wire_name in read_outputs[i]:
+                            wire = curr_outputs[wire_name]
+                            wire.usage = WireUsage.OUTPUT
+                            roots.append(wire)
+                    # Write outputs to VCD
                     for wire in curr_outputs.values():
                         update_wire(i, wire)
                     writer.change(clk, i * CYCLE_LEN_NS, 1) # posedge
                     writer.change(clk, i * CYCLE_LEN_NS + CYCLE_LEN_NS // 2, 0) # negedge
-                    curr_state = next_state
-                    curr_state.freeze()
-        # TODO just need to perform mark and sweep here, with READ_OUTPUTS as root set
-        root_set: Set[ConcreteWire] = set()
+        # Root set was populated during simulation - now, we mark and sweep
+        # print(f"Roots: {roots}")
+        marked = roots[:]
+        stack = roots[:]
+        while len(stack) != 0:
+            wire = stack.pop()
+            for in_wire in wire.srcs:
+                if in_wire.usage != WireUsage.UNUSED and in_wire not in marked:
+                    marked.append(in_wire)
+                    stack.append(in_wire)
+        print(marked)
+
 
 # === Simple CL Gates ===
 class AndGate1B(Circuit):
@@ -210,12 +227,14 @@ if __name__ == '__main__':
         1: {"a": BV1(0), "b": BV1(1)},
         2: {"a": BV1(1), "b": BV1(0)},
         3: {"a": BV1(1), "b": BV1(1)},
-    }, {})
+    }, {
+        3: {"q"}
+    })
 
-    circ2 = XorFeedback()
-    circ2.dump("xor_fb.vcd", 4, {
-        0: {"a": BV1(1)},
-        1: {"a": BV1(1)},
-        2: {"a": BV1(1)},
-        3: {"a": BV1(1)},
-    }, {})
+    # circ2 = XorFeedback()
+    # circ2.dump("xor_fb.vcd", 4, {
+    #     0: {"a": BV1(1)},
+    #     1: {"a": BV1(1)},
+    #     2: {"a": BV1(1)},
+    #     3: {"a": BV1(1)},
+    # }, {})
