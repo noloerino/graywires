@@ -10,6 +10,10 @@ class BitVector:
     value: int
     width: int
 
+def BV1(value):
+    return BitVector(value, 1)
+
+GraphNode = Tuple[BitVector, List["ConcreteWire"]]
 
 @dataclass
 class ConcreteWire:
@@ -26,7 +30,7 @@ class ConcreteWire:
     # cannot be checked.
     srcs: List["ConcreteWire"] = field(default_factory=list)
 
-    def __and__(self, o) -> Tuple[BitVector, List["ConcreteWire"]]:
+    def __and__(self, o) -> GraphNode:
         bv = BitVector(self.bv.value & o.bv.value, min(self.bv.width, o.bv.width))
         if self.bv.value == 1 and o.bv.value == 1:
             return (bv, [self, o])
@@ -37,7 +41,7 @@ class ConcreteWire:
         else:
             return (bv, [self, o])
 
-    def __or__(self, o) -> Tuple[BitVector, List["ConcreteWire"]]:
+    def __or__(self, o) -> GraphNode:
         bv = BitVector(self.bv.value | o.bv.value, min(self.bv.width, o.bv.width))
         if self.bv.value == 0 and o.bv.value == 0:
             return (bv, [self, o])
@@ -48,13 +52,37 @@ class ConcreteWire:
         else:
             return (bv, [self, o])
 
-    def __xor__(self, o) -> Tuple[BitVector, List["ConcreteWire"]]:
+    def __xor__(self, o) -> GraphNode:
         return (
             BitVector(self.bv.value ^ o.bv.value, min(self.bv.width, o.bv.width)),
             [self, o]
         )
 
-    def ite(self, t: "ConcreteWire", f: "ConcreteWire") -> Tuple[BitVector, List["ConcreteWire"]]:
+    def __lt__(self, o) -> GraphNode:
+        return (BV1(self.bv.value < o.bv.value), [self, o])
+
+    def __le__(self, o) -> GraphNode:
+        return (BV1(self.bv.value <= o.bv.value), [self, o])
+
+    def __eq__(self, o) -> GraphNode:
+        return (BV1(self.bv.value == o.bv.value), [self, o])
+
+    def __ne__(self, o) -> GraphNode:
+        return (BV1(self.bv.value != o.bv.value), [self, o])
+
+    def __ge__(self, o) -> GraphNode:
+        return (BV1(self.bv.value >= o.bv.value), [self, o])
+
+    def __gt__(self, o) -> GraphNode:
+        return (BV1(self.bv.value > o.bv.value), [self, o])
+
+    def __add__(self, o) -> GraphNode:
+        return (BitVector(self.bv.value + o.bv.value, max(self.bv.width, o.bv.width)), [self, o])
+
+    def __inv__(self) -> GraphNode:
+        return (BitVector(~self.bv.value, self.bv.width), [self])
+
+    def ite(self, t: "ConcreteWire", f: "ConcreteWire") -> GraphNode:
         """
         Computes an if/then/else expression, where self holds the boolean condition. "True" is
         considered any nonzero value, and "False" is zero.
@@ -287,6 +315,8 @@ class Circuit:
                 with open(f"usage_{path}", "w") as f:
                     with vcd.VCDWriter(f, timescale="1 ns", date="today") as writer:
                         self._simulate_with_usage(writer, sim_cycles, input_values, marked)
+                return marked
+        raise ValueError("Unreachable code")
 
 
 # === Simple CL Gates ===
@@ -314,9 +344,6 @@ class AndFeedback(Circuit):
     def at_posedge_clk(self, curr_state, inputs, next_state, outputs):
         outputs["q"] = inputs["sel"].ite(curr_state["m"], inputs["a"])
         next_state["m"] = inputs["a"] & outputs["q"]
-
-def BV1(value):
-    return BitVector(value, 1)
 
 if __name__ == '__main__':
     # circ1 = AndGate1B()
