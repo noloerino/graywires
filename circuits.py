@@ -64,12 +64,6 @@ class ConcreteWire:
     def __le__(self, o) -> GraphNode:
         return (BV1(self.bv.value <= o.bv.value), [self, o])
 
-    def __eq__(self, o) -> GraphNode:
-        return (BV1(self.bv.value == o.bv.value), [self, o])
-
-    def __ne__(self, o) -> GraphNode:
-        return (BV1(self.bv.value != o.bv.value), [self, o])
-
     def __ge__(self, o) -> GraphNode:
         return (BV1(self.bv.value >= o.bv.value), [self, o])
 
@@ -82,19 +76,30 @@ class ConcreteWire:
     def __inv__(self) -> GraphNode:
         return (BitVector(~self.bv.value, self.bv.width), [self])
 
-    def mux(self, on_zero: "ConcreteWire", *args: "ConcreteWire") -> GraphNode:
+    def mux(self, on_zero, on_one, *args: "ConcreteWire") -> GraphNode:
         """
         Computes the result of a mux, where self is the select port and the values are given
-        in order (i.e. the 0 value is on_zero, 1 is the first of args).
+        in order (i.e. the 0 value is on_zero, 1 is on_one, 2 is the first of args).
         """
-        used_list = [] if all([on_zero.bv == w.bv for w in args]) else [self]
-        if self.bv.value != 0:
+        used_list = [] if on_zero.bv == on_one.bv and all([on_zero.bv == w.bv for w in args]) else [self]
+        if self.bv.value == 0:
             return (on_zero.bv, used_list + [on_zero])
+        elif self.bv.value == 1:
+            return (on_one.bv, used_list + [on_one])
         else:
-            idx = self.bv.value - 1
-            assert idx < len(args), f"Mux attempted to access {idx + 1}th value out of {len(args) + 1} inputs"
+            idx = self.bv.value - 2
+            assert idx < len(args), f"Mux attempted to access {idx + 2}th value out of {len(args) + 2} inputs"
             wire = args[idx]
             return (wire.bv, used_list + [wire])
+
+    def ite(self, t: "ConcreteWire", f: "ConcreteWire") -> GraphNode:
+        """
+        Computes an if/then/else expression, where self holds the boolean condition. "True" is
+        considered any nonzero value, and "False" is zero.
+
+        T is the value returned when true, and F is that returned when false.
+        """
+        return self.mux(f, t)
 
     def __repr__(self) -> str:
         return f"ConcreteWire(name={self.name}, bv={self.bv}, cycle={self.cycle})"
@@ -342,13 +347,14 @@ class AndFeedback(Circuit):
         return {"m": BV1(0)}
 
     def at_posedge_clk(self, curr_state, inputs, next_state, outputs):
-        outputs["q"] = inputs["sel"].mux(inputs["a"], curr_state["m"])
+        outputs["q"] = inputs["sel"].ite(curr_state["m"], inputs["a"])
         next_state["m"] = inputs["a"] & outputs["q"]
 
 class SmallRegfile(Circuit):
     """
     Implementation of a 4-element 1-bit register file. It has one address port
-    and one r/w port.
+    and one r/w port. For simplicitly, we assume that the the read value isn't
+    used on a cycle where a read is happening.
     """
 
     def initial_state_values(self) -> Dict[str, BitVector]:
@@ -360,7 +366,22 @@ class SmallRegfile(Circuit):
         }
 
     def at_posedge_clk(self, curr_state, inputs, next_state, outputs):
-        pass
+        outputs["rd_val"] = inputs["addr"].mux(
+            curr_state["r0"],
+            curr_state["r1"],
+            curr_state["r2"],
+            curr_state["r3"],
+        )
+        # TODO figure out how to allow easy choice of the write address:
+        # using a Python if/else construct does not let us figure out
+        # usability of the addr wire, although in this case we don't care
+        # since it's always used
+        addr_bits = inputs["addr"].bv.value
+        wr = bool(inputs["w"].bv.value)
+        next_state["r0"] = inputs["wr_val"] if wr and addr_bits == 0 else curr_state["r0"]
+        next_state["r1"] = inputs["wr_val"] if wr and addr_bits == 1 else curr_state["r1"]
+        next_state["r2"] = inputs["wr_val"] if wr and addr_bits == 2 else curr_state["r2"]
+        next_state["r3"] = inputs["wr_val"] if wr and addr_bits == 3 else curr_state["r3"]
 
 if __name__ == '__main__':
     # circ1 = AndGate1B()
@@ -396,4 +417,15 @@ if __name__ == '__main__':
         5: {"a": BV1(0), "sel": BV1(1)},
     }, {
         5: {"q"},
+    })
+
+    circ4 = SmallRegfile()
+    circ4.dump("small_regfile.vcd", 4, {
+        0: {"addr": BV1(0), "wr_val": BV1(0), "w": BV1(0)},
+        1: {"addr": BV1(1), "wr_val": BV1(1), "w": BV1(1)},
+        2: {"addr": BV1(2), "wr_val": BV1(1), "w": BV1(1)},
+        3: {"addr": BV1(1), "wr_val": BV1(0), "w": BV1(0)},
+    }, {
+        0: {"rd_val"},
+        3: {"rd_val"},
     })
