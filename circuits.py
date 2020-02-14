@@ -22,7 +22,8 @@ class ConcreteWire:
     bv: BitVector
     cycle: int
     # Represents the wires that are used to compute this wire
-    # This also gives us muxes for free, with the one caveat that the sel
+    # This also gives us muxes for free using ternaries, with the one caveat that the select bit
+    # cannot be checked.
     srcs: List["ConcreteWire"] = field(default_factory=list)
 
     def __and__(self, o) -> Tuple[BitVector, List["ConcreteWire"]]:
@@ -36,11 +37,35 @@ class ConcreteWire:
         else:
             return (bv, [self, o])
 
+    def __or__(self, o) -> Tuple[BitVector, List["ConcreteWire"]]:
+        bv = BitVector(self.bv.value | o.bv.value, min(self.bv.width, o.bv.width))
+        if self.bv.value == 0 and o.bv.value == 0:
+            return (bv, [self, o])
+        elif self.bv.value == 0 and o.bv.value == 1:
+            return (bv, [o])
+        elif self.bv.value == 1 and o.bv.value == 0:
+            return (bv, [self])
+        else:
+            return (bv, [self, o])
+
     def __xor__(self, o) -> Tuple[BitVector, List["ConcreteWire"]]:
         return (
             BitVector(self.bv.value ^ o.bv.value, min(self.bv.width, o.bv.width)),
             [self, o]
         )
+
+    def ite(self, t: "ConcreteWire", f: "ConcreteWire") -> Tuple[BitVector, List["ConcreteWire"]]:
+        """
+        Computes an if/then/else expression, where self holds the boolean condition. "True" is
+        considered any nonzero value, and "False" is zero.
+
+        T is the value returned when true, and F is that returned when false.
+        """
+        used_list = [self] if t.bv != f.bv else []
+        if self.bv.value != 0:
+            return (t.bv, used_list + [t])
+        else:
+            return (f.bv, used_list + [f])
 
     def __repr__(self) -> str:
         return f"ConcreteWire(name={self.name}, bv={self.bv}, cycle={self.cycle})"
@@ -180,6 +205,7 @@ class Circuit:
                 update_wire(i, wire)
             writer.change(clk, i * CYCLE_LEN_NS, 1) # posedge
             writer.change(clk, i * CYCLE_LEN_NS + CYCLE_LEN_NS // 2, 0) # negedge
+        writer.change(clk, (i + 1) * CYCLE_LEN_NS, 1)
         return roots
 
 
@@ -197,6 +223,9 @@ class Circuit:
         """
         vcd_var_dict, clk = self._vcd_init_vars(writer, input_values)
         curr_state = self.get_initial_state().freeze()
+
+        print(f"for {used_wires[0].srcs[1].srcs[1]}")
+        print(used_wires[0].srcs[1].srcs[1].srcs)
 
         used_lookup_list = [(wire.name, wire.cycle) for wire in used_wires]
         
@@ -229,6 +258,8 @@ class Circuit:
                 update_wire(i, wire)
             writer.change(clk, i * CYCLE_LEN_NS, 1) # posedge
             writer.change(clk, i * CYCLE_LEN_NS + CYCLE_LEN_NS // 2, 0) # negedge
+        # Tick one more posedge
+        writer.change(clk, (i + 1) * CYCLE_LEN_NS, 1)
 
 
     def dump(self, path, sim_cycles, input_values: Dict[int, Dict[str, BitVector]], read_outputs: Dict[int, Set[str]]):
@@ -274,22 +305,32 @@ class XorFeedback(Circuit):
         next_state["m"] = inputs["a"] ^ curr_state["m"]
         outputs["q"] = curr_state["m"]
 
+class AndFeedback(Circuit):
+    def get_initial_state(self):
+        w = WireBundle(0)
+        w["m"] = (BitVector(0, 1), [])
+        return w
+
+    def at_posedge_clk(self, curr_state, inputs, next_state, outputs):
+        outputs["q"] = inputs["sel"].ite(curr_state["m"], inputs["a"])
+        next_state["m"] = inputs["a"] & outputs["q"]
+
 def BV1(value):
     return BitVector(value, 1)
 
 if __name__ == '__main__':
-    circ1 = AndGate1B()
-    circ1.dump("and1b.vcd", 4, {
-        0: {"a": BV1(0), "b": BV1(0)},
-        1: {"a": BV1(0), "b": BV1(1)},
-        2: {"a": BV1(1), "b": BV1(0)},
-        3: {"a": BV1(1), "b": BV1(1)},
-    }, {
-        0: {"q"},
-        1: {"q"},
-        2: {"q"},
-        3: {"q"},
-    })
+    # circ1 = AndGate1B()
+    # circ1.dump("and1b.vcd", 4, {
+    #     0: {"a": BV1(0), "b": BV1(0)},
+    #     1: {"a": BV1(0), "b": BV1(1)},
+    #     2: {"a": BV1(1), "b": BV1(0)},
+    #     3: {"a": BV1(1), "b": BV1(1)},
+    # }, {
+    #     0: {"q"},
+    #     1: {"q"},
+    #     2: {"q"},
+    #     3: {"q"},
+    # })
 
     # circ2 = XorFeedback()
     # circ2.dump("xor_fb.vcd", 4, {
@@ -298,5 +339,17 @@ if __name__ == '__main__':
     #     2: {"a": BV1(1)},
     #     3: {"a": BV1(1)},
     # }, {
-    #     3: {"q"}
+    #     3: {"q"},
     # })
+
+    circ3 = AndFeedback()
+    circ3.dump("and_fb.vcd", 6, {
+        0: {"a": BV1(1), "sel": BV1(1)},
+        1: {"a": BV1(1), "sel": BV1(0)},
+        2: {"a": BV1(1), "sel": BV1(1)},
+        3: {"a": BV1(1), "sel": BV1(1)},
+        4: {"a": BV1(1), "sel": BV1(1)},
+        5: {"a": BV1(0), "sel": BV1(1)},
+    }, {
+        5: {"q"},
+    })
