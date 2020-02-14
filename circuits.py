@@ -82,18 +82,19 @@ class ConcreteWire:
     def __inv__(self) -> GraphNode:
         return (BitVector(~self.bv.value, self.bv.width), [self])
 
-    def ite(self, t: "ConcreteWire", f: "ConcreteWire") -> GraphNode:
+    def mux(self, on_zero: "ConcreteWire", *args: "ConcreteWire") -> GraphNode:
         """
-        Computes an if/then/else expression, where self holds the boolean condition. "True" is
-        considered any nonzero value, and "False" is zero.
-
-        T is the value returned when true, and F is that returned when false.
+        Computes the result of a mux, where self is the select port and the values are given
+        in order (i.e. the 0 value is on_zero, 1 is the first of args).
         """
-        used_list = [self] if t.bv != f.bv else []
+        used_list = [] if all([on_zero.bv == w.bv for w in args]) else [self]
         if self.bv.value != 0:
-            return (t.bv, used_list + [t])
+            return (on_zero.bv, used_list + [on_zero])
         else:
-            return (f.bv, used_list + [f])
+            idx = self.bv.value - 1
+            assert idx < len(args), f"Mux attempted to access {idx + 1}th value out of {len(args) + 1} inputs"
+            wire = args[idx]
+            return (wire.bv, used_list + [wire])
 
     def __repr__(self) -> str:
         return f"ConcreteWire(name={self.name}, bv={self.bv}, cycle={self.cycle})"
@@ -159,8 +160,14 @@ class Circuit:
         """
         raise NotImplementedError()
 
-    def get_initial_state(self) -> WireBundle:
-        return WireBundle(0)
+    def initial_state_values(self) -> Dict[str, BitVector]:
+        return {}
+
+    def _get_initial_state(self) -> WireBundle:
+        w = WireBundle(0)
+        for name, bv in self.initial_state_values().items():
+            w[name] = (bv, [])
+        return w
 
     def _vcd_init_vars(self, writer, input_values): # (Dict[str, vcd variable], clk)
         clk = writer.register_var("module", "clk", "time", size=1)
@@ -168,7 +175,7 @@ class Circuit:
         # Initialize dict of vcd variables
         def vcd_register(wire):
             vcd_var_dict[wire.name] = writer.register_var("module", wire.name, "integer", size=wire.bv.width)
-        vcd_state_0 = self.get_initial_state().freeze()
+        vcd_state_0 = self._get_initial_state().freeze()
         for wire in vcd_state_0.values():
             vcd_register(wire)
         # Run no-op simulation of cycle 0 to get all inputs and outputs registered
@@ -201,7 +208,7 @@ class Circuit:
         # Must be root list rather than set since ConcreteWire isn't hashable
         roots: List[ConcreteWire] = []
         vcd_var_dict, clk = self._vcd_init_vars(writer, input_values)
-        curr_state = self.get_initial_state().freeze()
+        curr_state = self._get_initial_state().freeze()
         
         # Run actual simulation
         for i in range(sim_cycles):
@@ -250,7 +257,7 @@ class Circuit:
         USED_WIRES comes from the mark and sweep phas.
         """
         vcd_var_dict, clk = self._vcd_init_vars(writer, input_values)
-        curr_state = self.get_initial_state().freeze()
+        curr_state = self._get_initial_state().freeze()
 
         used_lookup_list = [(wire.name, wire.cycle) for wire in used_wires]
         
@@ -323,24 +330,37 @@ class AndGate1B(Circuit):
 
 # === Circuit Implementations ===
 class XorFeedback(Circuit):
-    def get_initial_state(self):
-        w = WireBundle(0)
-        w["m"] = (BitVector(0, 1), [])
-        return w
+    def initial_state_values(self) -> Dict[str, BitVector]:
+        return {"m": BV1(0)}
 
     def at_posedge_clk(self, curr_state, inputs, next_state, outputs):
         next_state["m"] = inputs["a"] ^ curr_state["m"]
         outputs["q"] = curr_state["m"]
 
 class AndFeedback(Circuit):
-    def get_initial_state(self):
-        w = WireBundle(0)
-        w["m"] = (BitVector(0, 1), [])
-        return w
+    def initial_state_values(self) -> Dict[str, BitVector]:
+        return {"m": BV1(0)}
 
     def at_posedge_clk(self, curr_state, inputs, next_state, outputs):
-        outputs["q"] = inputs["sel"].ite(curr_state["m"], inputs["a"])
+        outputs["q"] = inputs["sel"].mux(inputs["a"], curr_state["m"])
         next_state["m"] = inputs["a"] & outputs["q"]
+
+class SmallRegfile(Circuit):
+    """
+    Implementation of a 4-element 1-bit register file. It has one address port
+    and one r/w port.
+    """
+
+    def initial_state_values(self) -> Dict[str, BitVector]:
+        return {
+            "r0": BV1(0),
+            "r1": BV1(0),
+            "r2": BV1(0),
+            "r3": BV1(0),
+        }
+
+    def at_posedge_clk(self, curr_state, inputs, next_state, outputs):
+        pass
 
 if __name__ == '__main__':
     # circ1 = AndGate1B()
