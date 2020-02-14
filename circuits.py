@@ -252,9 +252,6 @@ class Circuit:
         vcd_var_dict, clk = self._vcd_init_vars(writer, input_values)
         curr_state = self.get_initial_state().freeze()
 
-        print(f"for {used_wires[0].srcs[1].srcs[1]}")
-        print(used_wires[0].srcs[1].srcs[1].srcs)
-
         used_lookup_list = [(wire.name, wire.cycle) for wire in used_wires]
         
         # Run actual simulation
