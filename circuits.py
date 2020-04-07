@@ -410,7 +410,7 @@ if __name__ == '__main__':
     circ3.dump("and_fb.vcd", 6, {
         0: {"a": BV1(1), "sel": BV1(1)},
         1: {"a": BV1(1), "sel": BV1(0)},
-        2: {"a": BV1(1), "sel": BV1(1)},
+        2: {"a": BV1(1), "sel": BV1(0)},
         3: {"a": BV1(1), "sel": BV1(1)},
         4: {"a": BV1(1), "sel": BV1(1)},
         5: {"a": BV1(0), "sel": BV1(1)},
@@ -418,13 +418,13 @@ if __name__ == '__main__':
         5: {"q"},
     })
 
-    circ4 = SmallRegfile()
-    circ4.dump("small_regfile.vcd", 4, {
-        0: {"addr": BV1(0), "wr_val": BV1(0), "w": BV1(0)},
-        1: {"addr": BV1(1), "wr_val": BV1(1), "w": BV1(1)},
-        2: {"addr": BV1(2), "wr_val": BV1(1), "w": BV1(1)},
-        3: {"addr": BV1(1), "wr_val": BV1(0), "w": BV1(0)},
-    }, {
-        0: {"rd_val"},
-        3: {"rd_val"},
-    })
+    # circ4 = SmallRegfile()
+    # circ4.dump("small_regfile.vcd", 4, {
+    #     0: {"addr": BV1(0), "wr_val": BV1(0), "w": BV1(0)},
+    #     1: {"addr": BV1(1), "wr_val": BV1(1), "w": BV1(1)},
+    #     2: {"addr": BV1(2), "wr_val": BV1(1), "w": BV1(1)},
+    #     3: {"addr": BV1(1), "wr_val": BV1(0), "w": BV1(0)},
+    # }, {
+    #     0: {"rd_val"},
+    #     3: {"rd_val"},
+    # })
